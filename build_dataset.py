@@ -433,7 +433,7 @@ def resolve_output_path(raw_path: Path, purpose_tag: str) -> Path:
     return raw_path
 
 
-def build(source_plans, target_chunks, is_kld, wrap, gguf_path, out_path, seed=42):
+def build(source_plans, target_chunks, is_kld, wrap, gguf_path, out_path, seed=None):
     rng = random.Random(seed)
 
     jinja_tmpl = None
@@ -494,7 +494,7 @@ def parse_args():
     p.add_argument("--wrap",     action="store_true", help="Wrap with chat template")
     p.add_argument("--gguf",     help="Path to GGUF (required if --wrap)")
     p.add_argument("--output",   help="Output .txt path")
-    p.add_argument("--seed",     type=int, default=42)
+    p.add_argument("--seed", type=int, default=None, help="Random seed (default: non-reproducible)")
     p.add_argument("--list",     action="store_true", help="List sources and exit")
     return p.parse_args()
 

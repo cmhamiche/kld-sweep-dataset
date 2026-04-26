@@ -1,5 +1,4 @@
 import argparse
-import os
 import random
 import sys
 from datetime import datetime
@@ -39,8 +38,9 @@ from huggingface_hub import hf_hub_download
 # Catalogue
 # ---------------------------------------------------------------------------
 
-HF_REPO   = "eaddario/imatrix-calibration"
+HF_REPO = "eaddario/imatrix-calibration"
 CACHE_DIR = Path.home() / ".cache" / "dataset-builder"
+MAX_GGUF_BYTES = 4 * 1024 * 1024 * 1024 * 1024
 
 CATALOGUE = {
     # ── text — single languages ───────────────────────────────────────────
@@ -124,6 +124,9 @@ def estimate_chunks(key: str, size: str) -> int:
 # ---------------------------------------------------------------------------
 
 def fetch_parquet(fname: str) -> Path:
+    if ".." in Path(fname).parts:
+        print(f"\n[ERROR] Invalid filename (path traversal): {fname}")
+        sys.exit(1)
     cached = CACHE_DIR / fname
     if cached.exists():
         print(f"  [cache] {fname}")
@@ -143,21 +146,15 @@ def fetch_parquet(fname: str) -> Path:
         sys.exit(1)
 
 
-def read_rows(fname: str, cat: str) -> list:
+def read_rows(fname: str) -> list:
     parquet_path = fetch_parquet(fname)
     df = pd.read_parquet(parquet_path)
+    if df.empty:
+        print(f" [WARN] {fname}: parquet is empty")
+        return []
     col = df.columns[0]
-
-    if cat == "tools":
-        # Single blob row — split by newline
-        blob = str(df[col].iloc[0])
-        return [l.strip() for l in blob.split("\n") if l.strip()]
-
-    # Column name IS the first data row (no real header in these parquets)
-    # Drop NaN rows (pandas returns float for missing values, v == v is False for NaN)
-    first_row = str(col)
-    rest = [str(v) for v in df[col].tolist() if v == v and v is not None and str(v).strip()]
-    return [first_row] + rest
+    raw = str(df[col].iloc[0])
+    return [line.strip() for line in raw.split("\n") if line.strip()]
 
 # ---------------------------------------------------------------------------
 # Chat template extraction
@@ -186,9 +183,7 @@ def extract_chat_template(gguf_path: Path) -> str:
 # Jinja2 wrapping
 # ---------------------------------------------------------------------------
 
-def wrap_text(text: str, jinja_template: str) -> str:
-    tmpl = Template(jinja_template)
-    # raise_exception is registered by HuggingFace at render time — dummy here
+def wrap_text(text: str, tmpl: Template) -> str:
     return tmpl.render(
         messages=[{"role": "user", "content": text}],
         add_generation_prompt=True,
@@ -227,6 +222,10 @@ def pick_gguf_path() -> Path:
 
     if not path.exists():
         print(f"\n[ERROR] File not found: {path}")
+        sys.exit(1)
+
+    if path.stat().st_size > MAX_GGUF_BYTES:
+        print(f"\n[ERROR] File too large: {path} ({path.stat().st_size / 1e12:.1f} TB, limit {MAX_GGUF_BYTES / 1e12:.0f} TB)")
         sys.exit(1)
 
     # Validate GGUF magic bytes — first 4 bytes must be b'GGUF'
@@ -367,36 +366,38 @@ def run_interactive():
     print(f"\n  Target: {target_chunks} chunks at -c {CONTEXT}")
     print("  Checking availability...\n")
 
-    source_plans   = []
+    source_plans = []
     any_insufficient = False
+    n_sources = max(1, len(selected_sources))
+    chunks_per_src = max(1, target_chunks // n_sources)
 
     for key in selected_sources:
         entry = CATALOGUE.get(key)
         if not entry:
-            print(f"  [WARN] Unknown source key: {key} — skipped")
+            print(f" [WARN] Unknown source key: {key} — skipped")
             continue
 
         chosen_size = None
-        chosen_est  = 0
+        chosen_est = 0
         for sz in SIZES:
             if sz not in entry["files"]:
                 continue
             est = estimate_chunks(key, sz)
-            if est >= target_chunks:
+            if est >= chunks_per_src:
                 chosen_size = sz
-                chosen_est  = est
+                chosen_est = est
                 break
 
         if chosen_size is None:
             for sz in reversed(SIZES):
                 if sz in entry["files"]:
                     chosen_size = sz
-                    chosen_est  = estimate_chunks(key, sz)
+                    chosen_est = estimate_chunks(key, sz)
                     break
-            print(f"  [WARN] {key}: max ~{chosen_est} chunks (target {target_chunks} unreachable)")
+            print(f" [WARN] {key}: max ~{chosen_est} chunks (target {chunks_per_src} unreachable)")
             any_insufficient = True
         else:
-            print(f"  {key}: '{chosen_size}' -> ~{chosen_est} chunks")
+            print(f" {key}: '{chosen_size}' -> ~{chosen_est} chunks")
 
         source_plans.append((key, chosen_size, f"{key}_{chosen_size}.parquet", entry["cat"], chosen_est))
 
@@ -424,12 +425,20 @@ def run_interactive():
 # Build
 # ---------------------------------------------------------------------------
 
+def resolve_output_path(raw_path: Path, purpose_tag: str) -> Path:
+    ts = datetime.now().strftime("%y%m%d-%H%M")
+    default_name = f"{purpose_tag}_dataset_{ts}.txt"
+    if raw_path.is_dir() or (not raw_path.suffix and not raw_path.exists()):
+        return raw_path / default_name
+    return raw_path
+
+
 def build(source_plans, target_chunks, is_kld, wrap, gguf_path, out_path, seed=42):
     rng = random.Random(seed)
 
     jinja_tmpl = None
     if wrap:
-        jinja_tmpl = extract_chat_template(gguf_path)
+        jinja_tmpl = Template(extract_chat_template(gguf_path))
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     all_rows = []
@@ -440,7 +449,7 @@ def build(source_plans, target_chunks, is_kld, wrap, gguf_path, out_path, seed=4
 
     for key, size, fname, cat, est_chunks in source_plans:
         print(f"\n  {fname}")
-        rows = read_rows(fname, cat)
+        rows = read_rows(fname)
         print(f"  {len(rows):,} rows loaded")
 
         avg            = AVG_CHARS.get(cat, 200)
@@ -452,6 +461,9 @@ def build(source_plans, target_chunks, is_kld, wrap, gguf_path, out_path, seed=4
         all_rows.extend(
             [wrap_text(r, jinja_tmpl) for r in sampled] if jinja_tmpl else sampled
         )
+
+    purpose_tag = "eval" if is_kld else "imatrix"
+    out_path = resolve_output_path(out_path, purpose_tag)
 
     rng.shuffle(all_rows)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -498,22 +510,27 @@ def main():
         sys.exit(0)
 
     if args.purpose and args.sources and args.chunks and args.output:
+        if args.chunks < 1:
+            print("\n[ERROR] --chunks must be >= 1")
+            sys.exit(1)
         # CLI mode
         if args.wrap and not args.gguf:
             print("\n[ERROR] --gguf is required when --wrap is set")
             sys.exit(1)
 
-        gguf_path    = Path(args.gguf) if args.gguf else None
+        gguf_path = Path(args.gguf) if args.gguf else None
         source_plans = []
+        n_sources = len(args.sources)
+        chunks_per_src = max(1, args.chunks // n_sources)
 
         for key in args.sources:
             if key not in CATALOGUE:
                 print(f"\n[ERROR] Unknown source: {key!r}. Run --list to see options.")
                 sys.exit(1)
-            entry       = CATALOGUE[key]
+            entry = CATALOGUE[key]
             chosen_size = None
             for sz in SIZES:
-                if sz in entry["files"] and estimate_chunks(key, sz) >= args.chunks:
+                if sz in entry["files"] and estimate_chunks(key, sz) >= chunks_per_src:
                     chosen_size = sz
                     break
             if not chosen_size:
@@ -521,9 +538,9 @@ def main():
                     if sz in entry["files"]:
                         chosen_size = sz
                         break
-                print(f"  [WARN] {key}: cannot reach {args.chunks} chunks, using '{chosen_size}'")
+                print(f" [WARN] {key}: cannot reach {chunks_per_src} chunks, using '{chosen_size}'")
             source_plans.append((key, chosen_size, f"{key}_{chosen_size}.parquet",
-                                  entry["cat"], estimate_chunks(key, chosen_size)))
+                                 entry["cat"], estimate_chunks(key, chosen_size)))
 
         is_kld = (args.purpose == "kld")
         build(source_plans, args.chunks, is_kld, args.wrap, gguf_path, Path(args.output), args.seed)

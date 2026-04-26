@@ -20,13 +20,15 @@ python build_dataset.py
 **CLI:**
 ```
 python build_dataset.py \
-  --purpose kld \
-  --sources text_fr math code \
-  --chunks 100 \
-  --wrap \
-  --gguf C:\models\MyModel.gguf \
-  --output eval_dataset.txt
+--purpose kld \
+--sources text_fr math code \
+--chunks 100 \
+--wrap \
+--gguf C:\models\MyModel.gguf \
+--output eval_dataset.txt
 ```
+
+Each run produces a unique dataset — rows are randomly sampled and shuffled by default. Pass `--seed <int>` for reproducible output.
 
 **List available sources:**
 ```
@@ -73,6 +75,7 @@ When wrapping is enabled, the Jinja2 chat template is extracted directly from th
 ## Output
 
 - Named `eval_dataset_YYMMDD-HHMM.txt` or `imatrix_dataset_YYMMDD-HHMM.txt` by default
+- `--output` accepts a file path or a directory (auto-generates a timestamped filename inside)
 - Plain UTF-8, rows separated by double newlines — compatible with `llama-perplexity` and `llama-imatrix`
 - Final summary shows row count and estimated llama-perplexity chunk count at `-c 512`
 
@@ -81,3 +84,4 @@ When wrapping is enabled, the Jinja2 chat template is extracted directly from th
 - Chunk estimation uses hardcoded average chars/row per category (derived from sampling). Actual chunk count from llama-perplexity may vary ±10%.
 - The `_small` files in the eaddario repo contain ~2x the rows listed in the README — the script reads actual row counts at runtime.
 - Tools files are stored as a single blob per file and are split by newline internally.
+- Datasets are non-reproducible by default (random seed). Use `--seed` if you need deterministic output.

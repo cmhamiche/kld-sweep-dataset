@@ -82,6 +82,8 @@ When wrapping is enabled, the Jinja2 chat template is extracted directly from th
 ## Notes
 
 - Chunk estimation uses hardcoded average chars/row per category (derived from sampling). Actual chunk count from llama-perplexity may vary ±10%.
-- The `_small` files in the eaddario repo contain ~2x the rows listed in the README — the script reads actual row counts at runtime.
+- The `_small` files in the eaddario repo contain ~2x the rows listed in the README.
+- The script reads actual row counts at runtime.
+- 
 - Tools files are stored as a single blob per file and are split by newline internally.
 - Datasets are non-reproducible by default (random seed). Use `--seed` if you need deterministic output.
